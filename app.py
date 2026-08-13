@@ -75,6 +75,35 @@ def calculate_rsi(close_prices, period=14):
     return rsi
 
 
+def backtest_signal(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="2y")
+        if hist.empty or len(hist) < 100:
+            return None
+
+        hist["MA20"] = hist["Close"].rolling(window=20).mean()
+        hist["MA50"] = hist["Close"].rolling(window=50).mean()
+        hist["bullish"] = hist["MA20"] > hist["MA50"]
+        hist["future_return"] = hist["Close"].shift(-5) / hist["Close"] - 1
+        hist = hist.dropna(subset=["future_return", "MA20", "MA50"])
+
+        bullish_days = hist[hist["bullish"]]
+        bearish_days = hist[~hist["bullish"]]
+
+        result = {}
+        if len(bullish_days) > 0:
+            result["bullish_count"] = len(bullish_days)
+            result["bullish_up_pct"] = round((bullish_days["future_return"] > 0).mean() * 100, 1)
+        if len(bearish_days) > 0:
+            result["bearish_count"] = len(bearish_days)
+            result["bearish_up_pct"] = round((bearish_days["future_return"] > 0).mean() * 100, 1)
+
+        return result
+    except Exception:
+        return None
+
+
 @app.route("/")
 def chart():
     ticker = request.args.get("ticker", "AAPL").upper()
@@ -137,6 +166,8 @@ def chart():
         summary_text = f"{ticker}: " + "; ".join(technical_signals)
         summary_text += f"; recent news sentiment is {news_overall}"
 
+        backtest = backtest_signal(ticker)
+
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
             row_heights=[0.75, 0.25], vertical_spacing=0.03,
@@ -197,12 +228,27 @@ def chart():
             </div>
         """
 
+        backtest_html = ""
+        if backtest:
+            lines = []
+            if "bullish_up_pct" in backtest:
+                lines.append(f"When MA20 was above MA50 ({backtest['bullish_count']} days in the last 2 years), the stock was higher 5 days later {backtest['bullish_up_pct']}% of the time.")
+            if "bearish_up_pct" in backtest:
+                lines.append(f"When MA20 was below MA50 ({backtest['bearish_count']} days), the stock was higher 5 days later {backtest['bearish_up_pct']}% of the time.")
+            backtest_html = f"""
+                <div style="padding:16px; font-family:sans-serif; max-width:900px; color:#ccc; font-size:14px; border-top:1px solid #222;">
+                    <div style="font-size:16px; color:#ddd; margin-bottom:8px; font-weight:bold;">Historical backtest (2 years)</div>
+                    {"<br>".join(lines) if lines else "Not enough historical data to backtest."}
+                </div>
+            """
+
         page = "<html><head><title>" + ticker + " Chart</title></head>"
         page += "<body style='background-color:#111; margin:0;'>"
         page += search_box
         page += summary_html
         page += chart_html
         page += news_html
+        page += backtest_html
         page += "</body></html>"
         return page
 
@@ -212,4 +258,6 @@ def chart():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    import os
+    port = int(os.environ.get("PORT", 5001))
+    app.run(debug=True, host="0.0.0.0", port=port)
